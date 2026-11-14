@@ -351,13 +351,14 @@ function detectExplicitCurrency(rawCurrency, rawCostCell) {
   const vStr = rawTrim(rawCostCell).replace(/[\s\u00a0\u202f]+/g, ' ').toUpperCase();
   let costCur = '';
   if (vStr) {
-    if (/\bAUD\b|AU\$|A\$|\$\s*AU\b/.test(vStr)) {
-      costCur = 'AUD';
-    } else if (/\bCAD\b|CA\$|\$\s*CA\b/.test(vStr)) {
-      costCur = 'CAD';
-    } else if (/\b(?:USD|EUR|GBP|NZD|JPY|CHF|MXN|INR|SGD|HKD)\b|US\$|NZ\$|HK\$|S\$|[€£¥₹]/.test(vStr)) {
+    const hasCad = /\bCAD\b|(?:^|[^A-Z])CA\$|\$\s*CA\b/.test(vStr);
+    const hasAud = /\bAUD\b|(?:^|[^A-Z])(?:AU|A)\$|\$\s*AU\b/.test(vStr);
+    const hasOther = /\b(?:USD|EUR|GBP|NZD|JPY|CHF|MXN|INR|SGD|HKD)\b|(?:^|[^A-Z])(?:US|NZ|HK|S)\$|[€£¥₹]/.test(vStr);
+    if (hasOther || (hasCad && hasAud)) {
       return 'OTHER';
     }
+    if (hasCad) costCur = 'CAD';
+    else if (hasAud) costCur = 'AUD';
   }
 
   if (curCol && costCur && curCol !== costCur) {
@@ -569,9 +570,13 @@ function validateSheetCsvSchema(text, kind, requireNonEmptyRows) {
   if (hIdx === -1) {
     return { ok: false, reason: 'Missing required schema columns on ' + kind };
   }
+  const hdrFold = rows[hIdx].map(c => foldText(c));
+  const iPrimary = kind === 'st'
+    ? colIdx(hdrFold, ['search term', 'query', 'terme de recherche', 'termes de recherche'])
+    : 0;
   const dataCount = rows.slice(hIdx + 1).filter(r => {
-    const c0 = foldText(r[0] || '');
-    return c0 && !c0.startsWith('total');
+    const c0 = foldText((iPrimary >= 0 ? r[iPrimary] : r[0]) || '');
+    return c0 && !c0.startsWith('total:') && c0 !== 'total';
   }).length;
   if (requireNonEmptyRows && dataCount === 0) {
     return { ok: false, reason: 'Accidental 0-row wipe blocked on active tab (' + kind + ')' };
@@ -2081,17 +2086,20 @@ function tr(lang, key, vars) {
 
     const BASELINE_1M_CTX = buildBaseline1mContext();
 
-    // Parse URL parameters (?brand=fleur_quebec|aussie_blooms, ?mode=readonly, ?lang=fr|en, ?theme=light|dark)
+    // Parse URL parameters (?brand=fleur_quebec|aussie_blooms, ?period=1w..9m, ?mode=readonly, ?lang=fr|en, ?theme=light|dark)
     const urlParams = new URLSearchParams(window.location.search || '');
     const initBrandParam = urlParams.get('brand');
     const initBrand = BRAND_SLUGS.includes(initBrandParam) ? initBrandParam : (DB.meta.default_brand || 'fleur_quebec');
+    const validPeriods = DB.meta.period_order || ['1w', '2w', '1m', '3m', '9m'];
+    const initPeriodParam = urlParams.get('period');
+    const initPeriod = validPeriods.includes(initPeriodParam) ? initPeriodParam : (DB.meta.active_period || '1m');
     const initLangParam = urlParams.get('lang');
     const initReadOnly = urlParams.get('mode') === 'readonly' || urlParams.get('readonly') === '1';
     const initTheme = urlParams.get('theme') === 'dark' ? 'dark' : 'light';
 
     const state = {
       brand: initBrand,
-      period: DB.meta.active_period || '1m',
+      period: initPeriod,
       lang: (initLangParam === 'en' || initLangParam === 'fr') ? initLangParam : (initBrand === 'aussie_blooms' ? 'en' : 'fr'),
       langPinned: (initLangParam === 'en' || initLangParam === 'fr'),
       theme: initTheme,
@@ -2483,10 +2491,11 @@ function tr(lang, key, vars) {
         }
         const rows = parseGoogleAdsCsv(text, targetBrandSlug);
         const brandRows = rows.filter(r => r.bs === targetBrandSlug);
-        if (!brandRows.length) {
+        if (brandRows.length === 0 || brandRows.length < schemaCheck.dataCount) {
+          const rejectedCnt = schemaCheck.dataCount - brandRows.length;
           state.syncError = state.lang === 'fr'
-            ? ('0 ligne valide pour ' + bm.display_name + ' (' + bm.currency + ') : import inter-marques ou inter-devises bloqué (CAD ≠ AUD).')
-            : ('0 rows matched ' + bm.display_name + ' (' + bm.currency + '): cross-brand / cross-currency import blocked (CAD ≠ AUD).');
+            ? ('Import refusé (' + rejectedCnt + '/' + schemaCheck.dataCount + ' ligne(s) hors ' + bm.display_name + ' · ' + bm.currency + ') : fichiers mixtes ou autre devise bloqués (CAD ≠ AUD).')
+            : ('Upload rejected (' + rejectedCnt + '/' + schemaCheck.dataCount + ' row(s) did not match ' + bm.display_name + ' · ' + bm.currency + '): mixed-currency / cross-brand imports blocked (CAD ≠ AUD).');
           renderFreshnessStrip();
           return;
         }
@@ -3231,7 +3240,7 @@ function tr(lang, key, vars) {
       renderCompareDrawer();
     });
     document.getElementById('btnShareLink').addEventListener('click', () => {
-      const shareUrl = 'https://genale13.github.io/bloomex-kw-hub-8f4c2a/?brand=' + state.brand + '&mode=readonly';
+      const shareUrl = 'https://genale13.github.io/bloomex-kw-hub-8f4c2a/?brand=' + state.brand + '&period=' + state.period + '&lang=' + state.lang + '&mode=readonly';
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(shareUrl).catch(() => {});
       }
