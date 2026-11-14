@@ -228,7 +228,8 @@
       <div id="explorerToolbar" class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
         <div id="rowFilterGroup" class="flex flex-wrap items-center gap-1.5"></div>
         <div class="flex flex-wrap items-center gap-2 w-full lg:w-auto">
-          <input id="searchInput" type="search" class="btn-touch w-full sm:w-72 px-3.5 py-2 rounded-xl text-xs sm:text-sm border border-[var(--border)] bg-[var(--background)] text-[var(--foreground)]" placeholder="Rechercher…" />
+          <select id="campaignSelect" aria-label="Campaign Filter" class="btn-touch w-full sm:w-56 px-3 py-2 rounded-xl text-xs sm:text-sm border border-[var(--border)] bg-[var(--background)] text-[var(--foreground)]"></select>
+          <input id="searchInput" type="search" class="btn-touch w-full sm:w-64 px-3.5 py-2 rounded-xl text-xs sm:text-sm border border-[var(--border)] bg-[var(--background)] text-[var(--foreground)]" placeholder="Rechercher…" />
           <label id="localUploadLabel" class="btn-touch inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border border-[var(--border)] cursor-pointer hover:opacity-85 transition">
             <span>📂</span>
             <span id="lblLocalUpload">Tester CSV</span>
@@ -334,14 +335,53 @@ function parseNum(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function resolveBrandSlug(rawSub, rawCurrency, fallbackSlug) {
+function detectExplicitCurrency(rawCurrency, rawCostCell) {
+  const cStr = rawTrim(rawCurrency).replace(/[\s\u00a0\u202f]+/g, ' ').toUpperCase();
+  let curCol = '';
+  if (cStr) {
+    if (cStr === 'AUD' || cStr === 'A$' || cStr === 'AU$' || cStr === '$ AU' || cStr === '$AU') {
+      curCol = 'AUD';
+    } else if (cStr === 'CAD' || cStr === 'CA$' || cStr === '$ CA' || cStr === '$CA') {
+      curCol = 'CAD';
+    } else {
+      return 'OTHER';
+    }
+  }
+
+  const vStr = rawTrim(rawCostCell).replace(/[\s\u00a0\u202f]+/g, ' ').toUpperCase();
+  let costCur = '';
+  if (vStr) {
+    if (/\bAUD\b|AU\$|A\$|\$\s*AU\b/.test(vStr)) {
+      costCur = 'AUD';
+    } else if (/\bCAD\b|CA\$|\$\s*CA\b/.test(vStr)) {
+      costCur = 'CAD';
+    } else if (/\b(?:USD|EUR|GBP|NZD|JPY|CHF|MXN|INR|SGD|HKD)\b|US\$|NZ\$|HK\$|S\$|[€£¥₹]/.test(vStr)) {
+      return 'OTHER';
+    }
+  }
+
+  if (curCol && costCur && curCol !== costCur) {
+    return 'OTHER';
+  }
+  return curCol || costCur || '';
+}
+
+function resolveBrandSlug(rawSub, rawCurrency, rawCostCell, fallbackSlug) {
+  // Support 3-arg legacy call signature if rawCostCell omitted
+  if (arguments.length === 3 && (rawCostCell === 'fleur_quebec' || rawCostCell === 'aussie_blooms' || rawCostCell === '')) {
+    fallbackSlug = rawCostCell;
+    rawCostCell = '';
+  }
+  const expCur = detectExplicitCurrency(rawCurrency, rawCostCell);
+  if (expCur === 'OTHER') return '';
+
   const sRaw = rawTrim(rawSub);
   if (sRaw) {
     const low = foldText(sRaw);
+    let matched = '';
     if (low.includes('828-286-5409') || low.includes('fleur') || low.includes('quebec')) {
-      return 'fleur_quebec';
-    }
-    if (
+      matched = 'fleur_quebec';
+    } else if (
       low.includes('245-836-8322') ||
       low.includes('au-pending') ||
       low.includes('aussie') ||
@@ -349,14 +389,32 @@ function resolveBrandSlug(rawSub, rawCurrency, fallbackSlug) {
       low.includes('blooms aus') ||
       low.includes('australia')
     ) {
-      return 'aussie_blooms';
+      matched = 'aussie_blooms';
+    } else {
+      return '';
     }
-    return '';
+    if (matched === 'fleur_quebec' && expCur && expCur !== 'CAD') return '';
+    if (matched === 'aussie_blooms' && expCur && expCur !== 'AUD') return '';
+    return matched;
   }
-  const curLow = rawTrim(rawCurrency).toUpperCase();
-  if (curLow === 'AUD' || curLow === 'A$' || curLow === 'AU$') return 'aussie_blooms';
-  if (curLow === 'CAD' || curLow === 'CA$' || curLow === '$ CA') return 'fleur_quebec';
-  return fallbackSlug && BRAND_SLUGS.includes(fallbackSlug) ? fallbackSlug : 'fleur_quebec';
+
+  if (expCur === 'AUD') return 'aussie_blooms';
+  if (expCur === 'CAD') return 'fleur_quebec';
+  return (fallbackSlug && BRAND_SLUGS.includes(fallbackSlug)) ? fallbackSlug : '';
+}
+
+function fnv1aHash(str) {
+  const s = String(str == null ? '' : str);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    h1 ^= code;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= (code + (i & 0xff));
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  }
+  return s.length + ':' + h1.toString(16) + h2.toString(16);
 }
 
 function brandMetaForSlug(bs) {
@@ -491,17 +549,20 @@ function validateSheetCsvSchema(text, kind, requireNonEmptyRows) {
   if (kind === 'st') {
     reqGroups = [
       ['search term', 'query', 'terme de recherche', 'termes de recherche'],
-      ['cost', 'cout', 'depenses', 'spend']
+      ['campaign', 'campagne'],
+      ['cost', 'cout', 'depenses', 'spend'],
+      ['conversions', 'conv.', 'conv']
     ];
   } else if (kind === 'kw') {
     reqGroups = [
       ['keyword', 'search keyword', 'mot-cle', 'mot cle'],
-      ['campaign', 'campagne']
+      ['campaign', 'campagne'],
+      ['cost', 'cout', 'depenses', 'spend']
     ];
   } else if (kind === 'bm') {
     reqGroups = [
       ['campaign', 'campagne'],
-      ['daily budget', 'budget', 'configured target roas', 'target roas', 'cost', 'cout']
+      ['cost', 'cout', 'depenses', 'spend']
     ];
   }
   const hIdx = findHeaderRowIndex(rows, reqGroups);
@@ -559,9 +620,14 @@ function parseGoogleAdsCsv(text, fallbackBrandSlug) {
     if (tf.startsWith('total:') || tf === 'total') continue;
     const subRaw = iSub >= 0 ? rawTrim(row[iSub]) : '';
     const curRaw = iCur >= 0 ? rawTrim(row[iCur]) : '';
-    const bs = resolveBrandSlug(subRaw, curRaw, fallbackBrandSlug);
+    const costRawCell = iCost >= 0 ? rawTrim(row[iCost]) : '';
+    const valRawCell = iVal >= 0 ? rawTrim(row[iVal]) : '';
+    const valExpCur = detectExplicitCurrency('', valRawCell);
+    if (valExpCur === 'OTHER') continue;
+    const bs = resolveBrandSlug(subRaw, curRaw, costRawCell || valRawCell, fallbackBrandSlug);
     if (!bs) continue;
     const bm = brandMetaForSlug(bs);
+    if (valExpCur && valExpCur !== bm.currency) continue;
     const campRaw = iCamp >= 0 ? rawTrim(row[iCamp]) : 'General Search';
     const chRaw = iChType >= 0 ? rawTrim(row[iChType]) : (foldText(campRaw).includes('pmax') ? 'Performance Max' : 'Search');
     out.push({
@@ -614,9 +680,14 @@ function parseActiveKeywordsCsv(text, fallbackBrandSlug) {
     if (!kwRaw || foldText(kwRaw).startsWith('total')) continue;
     const subRaw = iSub >= 0 ? rawTrim(row[iSub]) : '';
     const curRaw = iCur >= 0 ? rawTrim(row[iCur]) : '';
-    const bs = resolveBrandSlug(subRaw, curRaw, fallbackBrandSlug);
+    const costRawCell = iCost >= 0 ? rawTrim(row[iCost]) : '';
+    const valRawCell = iVal >= 0 ? rawTrim(row[iVal]) : '';
+    const valExpCur = detectExplicitCurrency('', valRawCell);
+    if (valExpCur === 'OTHER') continue;
+    const bs = resolveBrandSlug(subRaw, curRaw, costRawCell || valRawCell, fallbackBrandSlug);
     if (!bs) continue;
     const bm = brandMetaForSlug(bs);
+    if (valExpCur && valExpCur !== bm.currency) continue;
     out.push({
       bs: bs,
       cur: bm.currency,
@@ -664,9 +735,14 @@ function parseBrandBenchmarksCsv(text, fallbackBrandSlug) {
     if (!campRaw || foldText(campRaw).startsWith('total')) continue;
     const subRaw = iSub >= 0 ? rawTrim(row[iSub]) : '';
     const curRaw = iCur >= 0 ? rawTrim(row[iCur]) : '';
-    const bs = resolveBrandSlug(subRaw, curRaw, fallbackBrandSlug);
+    const costRawCell = iCost >= 0 ? rawTrim(row[iCost]) : '';
+    const budRawCell = iBud >= 0 ? rawTrim(row[iBud]) : '';
+    const budExpCur = detectExplicitCurrency('', budRawCell);
+    if (budExpCur === 'OTHER') continue;
+    const bs = resolveBrandSlug(subRaw, curRaw, costRawCell || budRawCell, fallbackBrandSlug);
     if (!bs) continue;
     const bm = brandMetaForSlug(bs);
+    if (budExpCur && budExpCur !== bm.currency) continue;
     let troasVal = parseNum(iTroas >= 0 ? row[iTroas] : 0);
     if (troasVal > 20) troasVal = troasVal / 100.0;
     out.push({
@@ -755,9 +831,9 @@ function arrEq(a, b) {
 
 function matchesBaseline1mCanonical(stText, kwText, bmText) {
   if (!DB.baseline_1m_canonical) return false;
-  const stRows = parseGoogleAdsCsv(stText, 'fleur_quebec');
-  const kwRows = parseActiveKeywordsCsv(kwText, 'fleur_quebec');
-  const bmRows = parseBrandBenchmarksCsv(bmText, 'fleur_quebec');
+  const stRows = parseGoogleAdsCsv(stText, '');
+  const kwRows = parseActiveKeywordsCsv(kwText, '');
+  const bmRows = parseBrandBenchmarksCsv(bmText, '');
   const cand = canonicalizeBundleRows(stRows, kwRows, bmRows);
   return (
     arrEq(cand.st, DB.baseline_1m_canonical.st) &&
@@ -846,10 +922,10 @@ function containsPhrase(termFold, phraseFold) {
 }
 
 const SYMPATHY_TOKENS = [
-  'sympathy', 'funeral', 'condolence', 'condolences', 'wreath', 'casket',
-  'memorial', 'bereavement', 'obituary', 'cremation', 'tribute',
-  'deuil', 'funerailles', 'funeraille', 'funeraire', 'condoleances',
-  'condoleance', 'obseques', 'couronne', 'urne', 'hommage', 'salon funeraire'
+  'sympathy', 'funeral', 'funerals', 'condolence', 'condolences', 'wreath', 'wreaths',
+  'casket', 'memorial', 'bereavement', 'cemetery', 'chapel', 'obituary', 'cremation', 'tribute',
+  'deuil', 'funerailles', 'funeraille', 'funeraire', 'condoleances', 'condoleance',
+  'obseques', 'couronne', 'urne', 'hommage', 'salon funeraire', 'cimetiere', 'chapelle'
 ];
 
 function isSympathyQuery(text) {
@@ -2023,6 +2099,7 @@ function tr(lang, key, vars) {
       compareOpen: false,
       activeTab: 'quadrant',
       rowFilter: 'all',
+      campaignFilter: 'all',
       searchQuery: '',
       selectedBubbleIdx: 0,
       showProactiveSeeds: false,
@@ -2032,6 +2109,8 @@ function tr(lang, key, vars) {
       localOverrideByPeriodBrand: {},
       sheetCtxByPeriod: { '1m': BASELINE_1M_CTX },
       lastSyncedHashByPeriod: {},
+      syncSeq: 0,
+      syncSeqByPeriod: {},
       lastCheckedTs: null,
       syncing: false,
       syncError: null
@@ -2075,11 +2154,85 @@ function tr(lang, key, vars) {
     function setBrand(slug) {
       if (!BRAND_SLUGS.includes(slug)) return;
       state.brand = slug;
+      state.campaignFilter = 'all';
       state.selectedBubbleIdx = 0;
       if (!state.langPinned) {
         state.lang = slug === 'aussie_blooms' ? 'en' : 'fr';
       }
       renderAll();
+    }
+
+    function buildQuadrantNodes(stRows, kwRows, camps) {
+      const combined = stRows.map(r => ({
+        label: r.term,
+        camp: camps[r.ci] || '',
+        cost: r.cost,
+        conv: r.conv,
+        val: r.val,
+        obsRoas: r.obs_roas,
+        postRoas: r.roas_post,
+        targetR: r.R || 2.5,
+        pWin: r.p_win,
+        bucket: r.bucket,
+        reason: r.reason
+      }));
+      const seenLabels = new Set(combined.map(x => foldText(x.label)));
+      for (const k of kwRows) {
+        if (k.bucket === 'P2_SCALE' && !seenLabels.has(foldText(k.keyword))) {
+          combined.push({
+            label: '[' + k.keyword + ']',
+            camp: camps[k.ci] || '',
+            cost: k.cost,
+            conv: k.conv,
+            val: k.val,
+            obsRoas: k.obs_roas,
+            postRoas: k.roas_post,
+            targetR: k.R || 2.5,
+            pWin: k.p_win,
+            bucket: k.bucket,
+            reason: 'Confirmed Exact scaling keyword'
+          });
+        }
+      }
+      return combined;
+    }
+
+    function isSympathyContextActive() {
+      if (state.rowFilter === 'sympathy') return true;
+      if (isSympathyQuery(state.searchQuery || '')) return true;
+      if (state.campaignFilter && state.campaignFilter !== 'all' && isSympathyQuery(state.campaignFilter)) return true;
+      const b = getActiveBrandBundle();
+      if (b && b.live_loaded) {
+        const camps = getCampsArray();
+        const stFiltered = filterEntities(b.search_terms || [], camps, false);
+        const kwFiltered = filterEntities(b.keywords || [], camps, true);
+        const qNodes = buildQuadrantNodes(stFiltered, kwFiltered, camps);
+        if (qNodes.length > 0) {
+          const selIdx = Math.min(state.selectedBubbleIdx, qNodes.length - 1);
+          const selNode = qNodes[selIdx];
+          if (selNode && isSympathyQuery((selNode.label || '') + ' ' + (selNode.camp || ''))) {
+            return true;
+          }
+        }
+        const totalVisible = stFiltered.length + kwFiltered.length;
+        if (totalVisible > 0) {
+          const allStSymp = stFiltered.every(r => isSympathyQuery((r.term || '') + ' ' + (camps[r.ci] || '')));
+          const allKwSymp = kwFiltered.every(k => isSympathyQuery((k.keyword || '') + ' ' + (camps[k.ci] || '')));
+          if (allStSymp && allKwSymp) return true;
+        }
+      }
+      return false;
+    }
+
+    function updateAbTaglineVisibility() {
+      const abWrap = document.getElementById('abTaglineWrap');
+      if (!abWrap) return;
+      if (state.brand === 'aussie_blooms' && !isSympathyContextActive()) {
+        abWrap.classList.remove('hidden');
+        document.getElementById('abTaglineText').textContent = tr(state.lang, 'ab_tagline');
+      } else {
+        abWrap.classList.add('hidden');
+      }
     }
 
     function statusMeta(bucket, lang) {
@@ -2119,15 +2272,8 @@ function tr(lang, key, vars) {
       document.getElementById('currencyBadge').textContent = (isFq ? 'Canada · CAD' : (L === 'fr' ? 'Australie · AUD' : 'Australia · AUD'));
       document.getElementById('brandSubtitle').textContent = tr(L, isFq ? 'app_subtitle_fq' : 'app_subtitle_ab');
 
-      // Aussie Blooms tagline: strictly hidden on Fleur Québec AND whenever sympathy/funeral filter or search is active!
-      const sympathyActive = state.rowFilter === 'sympathy' || isSympathyQuery(state.searchQuery);
-      const abWrap = document.getElementById('abTaglineWrap');
-      if (!isFq && !sympathyActive) {
-        abWrap.classList.remove('hidden');
-        document.getElementById('abTaglineText').textContent = tr(L, 'ab_tagline');
-      } else {
-        abWrap.classList.add('hidden');
-      }
+      // Aussie Blooms tagline: strictly hidden on Fleur Québec AND whenever sympathy/bereavement context is active!
+      updateAbTaglineVisibility();
 
       const roBadge = document.getElementById('readonlyBadge');
       if (state.readOnly) {
@@ -2164,10 +2310,12 @@ function tr(lang, key, vars) {
       }).join('');
       pWrap.querySelectorAll('button[data-period]').forEach(btn => {
         btn.addEventListener('click', () => {
-          state.period = btn.getAttribute('data-period');
+          const pk = btn.getAttribute('data-period');
+          state.period = pk;
+          state.campaignFilter = 'all';
           state.selectedBubbleIdx = 0;
           renderAll();
-          if (IS_WEB_APP) syncFromGoogleSheet(false);
+          if (IS_WEB_APP) syncFromGoogleSheet(false, pk);
         });
       });
 
@@ -2320,14 +2468,25 @@ function tr(lang, key, vars) {
 
     function handleCsvUploadFile(file, targetBrandSlug) {
       if (!file || state.readOnly) return;
+      const uploadPeriod = state.period;
       const reader = new FileReader();
       reader.onload = () => {
         const text = String(reader.result || '');
-        const rows = parseGoogleAdsCsv(text, targetBrandSlug);
-        if (!rows.length) {
+        const bm = brandMetaForSlug(targetBrandSlug);
+        const schemaCheck = validateSheetCsvSchema(text, 'st', false);
+        if (!schemaCheck.ok || schemaCheck.dataCount === 0) {
           state.syncError = state.lang === 'fr'
-            ? 'Fichier CSV non reconnu : colonnes Search term et Cost requises.'
-            : 'CSV file missing required columns (Search term, Cost).';
+            ? 'Fichier CSV non reconnu ou vide : colonnes Search term, Campaign, Cost et Conversions requises.'
+            : 'Unrecognized or empty CSV: Search term, Campaign, Cost, and Conversions columns required.';
+          renderFreshnessStrip();
+          return;
+        }
+        const rows = parseGoogleAdsCsv(text, targetBrandSlug);
+        const brandRows = rows.filter(r => r.bs === targetBrandSlug);
+        if (!brandRows.length) {
+          state.syncError = state.lang === 'fr'
+            ? ('0 ligne valide pour ' + bm.display_name + ' (' + bm.currency + ') : import inter-marques ou inter-devises bloqué (CAD ≠ AUD).')
+            : ('0 rows matched ' + bm.display_name + ' (' + bm.currency + '): cross-brand / cross-currency import blocked (CAD ≠ AUD).');
           renderFreshnessStrip();
           return;
         }
@@ -2340,15 +2499,13 @@ function tr(lang, key, vars) {
           if (!campMap.has(s)) { campMap.set(s, camps.length); camps.push(s); }
           return campMap.get(s);
         }
-        const brandRows = rows.filter(r => r.bs === targetBrandSlug);
-        const useRows = brandRows.length ? brandRows : rows.map(r => Object.assign({}, r, {
-          bs: targetBrandSlug,
-          currency: targetBrandSlug === 'aussie_blooms' ? 'AUD' : 'CAD'
-        }));
-        const scored = scoreBrandStandalone(targetBrandSlug, useRows, [], [], state.period, getCampIdx);
+        const scored = scoreBrandStandalone(targetBrandSlug, brandRows, [], [], uploadPeriod, getCampIdx);
         scored._camps = camps;
-        state.localOverrideByPeriodBrand[state.period + '::' + targetBrandSlug] = scored;
-        state.selectedBubbleIdx = 0;
+        state.localOverrideByPeriodBrand[uploadPeriod + '::' + targetBrandSlug] = scored;
+        if (state.period === uploadPeriod && state.brand === targetBrandSlug) {
+          state.campaignFilter = 'all';
+          state.selectedBubbleIdx = 0;
+        }
         renderAll();
       };
       reader.readAsText(file);
@@ -2616,6 +2773,7 @@ function tr(lang, key, vars) {
       return rows.filter(r => {
         const text = isKw ? r.keyword : r.term;
         const campName = camps[r.ci] || '';
+        if (state.campaignFilter && state.campaignFilter !== 'all' && campName !== state.campaignFilter) return false;
         if (state.rowFilter === 'winners' && !(r.bucket === 'P1_HARVEST' || r.bucket === 'P2_SCALE')) return false;
         if (state.rowFilter === 'exclusions' && !(r.bucket === 'N1_HARD' || r.bucket === 'N2_STAT' || r.bucket === 'N2_KEYWORD')) return false;
         if (state.rowFilter === 'hold' && !(r.bucket === 'HOLD' || r.bucket === 'SEASONAL_HOLD')) return false;
@@ -2638,6 +2796,23 @@ function tr(lang, key, vars) {
       document.getElementById('explorerHeading').textContent = tr(L, 'explorer_heading');
       document.getElementById('searchInput').placeholder = tr(L, 'search_placeholder');
       document.getElementById('lblLocalUpload').textContent = tr(L, 'upload_custom_csv', { cur: cur });
+
+      // Populate Campaign Select dropdown for the active brand
+      const campSelect = document.getElementById('campaignSelect');
+      if (campSelect) {
+        const brandCampSet = new Set();
+        (b.search_terms || []).forEach(r => { if (camps[r.ci]) brandCampSet.add(camps[r.ci]); });
+        (b.keywords || []).forEach(k => { if (camps[k.ci]) brandCampSet.add(camps[k.ci]); });
+        const sortedCamps = Array.from(brandCampSet).sort();
+        if (state.campaignFilter !== 'all' && !brandCampSet.has(state.campaignFilter)) {
+          state.campaignFilter = 'all';
+        }
+        campSelect.innerHTML =
+          '<option value="all">' + escHtml(L === 'fr' ? 'Toutes les campagnes' : 'All campaigns') + '</option>' +
+          sortedCamps.map(cName => (
+            '<option value="' + escHtml(cName) + '"' + (state.campaignFilter === cName ? ' selected' : '') + '>' + escHtml(cName) + '</option>'
+          )).join('');
+      }
 
       const localLbl = document.getElementById('localUploadLabel');
       localLbl.classList.toggle('hidden', state.readOnly);
@@ -2723,37 +2898,7 @@ function tr(lang, key, vars) {
 
     function renderQuadrantTab(stage, stRows, kwRows, camps, cur) {
       const L = state.lang;
-      const combined = stRows.map(r => ({
-        label: r.term,
-        camp: camps[r.ci] || '',
-        cost: r.cost,
-        conv: r.conv,
-        val: r.val,
-        obsRoas: r.obs_roas,
-        postRoas: r.roas_post,
-        targetR: r.R || 2.5,
-        pWin: r.p_win,
-        bucket: r.bucket,
-        reason: r.reason
-      }));
-      const seenLabels = new Set(combined.map(x => foldText(x.label)));
-      for (const k of kwRows) {
-        if (k.bucket === 'P2_SCALE' && !seenLabels.has(foldText(k.keyword))) {
-          combined.push({
-            label: '[' + k.keyword + ']',
-            camp: camps[k.ci] || '',
-            cost: k.cost,
-            conv: k.conv,
-            val: k.val,
-            obsRoas: k.obs_roas,
-            postRoas: k.roas_post,
-            targetR: k.R || 2.5,
-            pWin: k.p_win,
-            bucket: k.bucket,
-            reason: 'Confirmed Exact scaling keyword'
-          });
-        }
-      }
+      const combined = buildQuadrantNodes(stRows, kwRows, camps);
 
       if (!combined.length) {
         stage.innerHTML = '<div class="rounded-xl border border-[var(--border)] p-6 text-center text-xs text-[var(--muted-foreground)]">' +
@@ -2835,7 +2980,11 @@ function tr(lang, key, vars) {
 
       stage.querySelectorAll('g[data-bidx]').forEach(g => {
         const idx = Number(g.getAttribute('data-bidx'));
-        g.addEventListener('click', () => { state.selectedBubbleIdx = idx; renderExplorer(); });
+        g.addEventListener('click', () => {
+          state.selectedBubbleIdx = idx;
+          updateAbTaglineVisibility();
+          renderExplorer();
+        });
       });
     }
 
@@ -3090,10 +3239,16 @@ function tr(lang, key, vars) {
       lbl.textContent = tr(state.lang, 'copied_link');
       setTimeout(() => { lbl.textContent = tr(state.lang, 'share_readonly'); }, 1800);
     });
+    document.getElementById('campaignSelect').addEventListener('change', e => {
+      state.campaignFilter = e.target.value || 'all';
+      state.selectedBubbleIdx = 0;
+      updateAbTaglineVisibility();
+      renderExplorer();
+    });
     document.getElementById('searchInput').addEventListener('input', e => {
       state.searchQuery = e.target.value || '';
       state.selectedBubbleIdx = 0;
-      renderHeader();
+      updateAbTaglineVisibility();
       renderExplorer();
     });
     document.getElementById('localCsvInput').addEventListener('change', e => {
@@ -3108,18 +3263,23 @@ function tr(lang, key, vars) {
     });
 
 
-async function syncFromGoogleSheet(manualTrigger) {
+async function syncFromGoogleSheet(manualTrigger, optPeriod) {
+  const reqPeriod = optPeriod || state.period;
   const endpoints = (DB.hub && DB.hub.google_sheet_hub && DB.hub.google_sheet_hub.endpoints) || {};
-  const stBase = endpoints[state.period];
+  const stBase = endpoints[reqPeriod];
   const kwBase = endpoints.active_keywords;
   const bmBase = endpoints.brand_benchmarks;
   if (!stBase || !kwBase || !bmBase) return;
+
+  const reqSeq = (state.syncSeq = (state.syncSeq || 0) + 1);
+  if (!state.syncSeqByPeriod) state.syncSeqByPeriod = {};
+  state.syncSeqByPeriod[reqPeriod] = reqSeq;
 
   state.syncing = true;
   renderFreshnessStrip();
 
   const bust = '&_cb=' + Date.now();
-  const isActivePeriod = state.period === (DB.meta.active_period || '1m');
+  const isActivePeriod = reqPeriod === (DB.meta.active_period || '1m');
 
   try {
     const [stRes, kwRes, bmRes] = await Promise.all([
@@ -3127,6 +3287,10 @@ async function syncFromGoogleSheet(manualTrigger) {
       fetch(kwBase + bust, { cache: 'no-store' }),
       fetch(bmBase + bust, { cache: 'no-store' })
     ]);
+    if (state.syncSeqByPeriod[reqPeriod] !== reqSeq) {
+      if (state.syncSeq === reqSeq) { state.syncing = false; renderFreshnessStrip(); }
+      return;
+    }
     if (!stRes.ok || !kwRes.ok || !bmRes.ok) {
       throw new Error('HTTP ' + stRes.status + '/' + kwRes.status + '/' + bmRes.status);
     }
@@ -3135,48 +3299,72 @@ async function syncFromGoogleSheet(manualTrigger) {
       kwRes.text(),
       bmRes.text()
     ]);
+    if (state.syncSeqByPeriod[reqPeriod] !== reqSeq) {
+      if (state.syncSeq === reqSeq) { state.syncing = false; renderFreshnessStrip(); }
+      return;
+    }
 
     const vSt = validateSheetCsvSchema(stTxt, 'st', isActivePeriod);
     if (!vSt.ok) throw new Error(vSt.reason);
-    const vKw = validateSheetCsvSchema(kwTxt, 'kw', isActivePeriod);
+    const vKw = validateSheetCsvSchema(kwTxt, 'kw', true);
     if (!vKw.ok) throw new Error(vKw.reason);
-    const vBm = validateSheetCsvSchema(bmTxt, 'bm', isActivePeriod);
+    const vBm = validateSheetCsvSchema(bmTxt, 'bm', true);
     if (!vBm.ok) throw new Error(vBm.reason);
 
-    const bundleHash = [stTxt.length, kwTxt.length, bmTxt.length, stTxt.slice(0, 180), stTxt.slice(-180), kwTxt.slice(-120), bmTxt.slice(-120)].join('|');
-    if (!manualTrigger && state.lastSyncedHashByPeriod[state.period] === bundleHash && state.sheetCtxByPeriod[state.period]) {
-      state.syncing = false;
+    const bundleHash = fnv1aHash(stTxt) + '|' + fnv1aHash(kwTxt) + '|' + fnv1aHash(bmTxt);
+    if (!manualTrigger && state.lastSyncedHashByPeriod[reqPeriod] === bundleHash && state.sheetCtxByPeriod[reqPeriod]) {
+      if (state.syncSeq === reqSeq) state.syncing = false;
       state.syncError = null;
       state.lastCheckedTs = Date.now();
       renderFreshnessStrip();
       return;
     }
 
+    const stRows = parseGoogleAdsCsv(stTxt, '');
+    const kwRows = parseActiveKeywordsCsv(kwTxt, '');
+    const bmRows = parseBrandBenchmarksCsv(bmTxt, '');
+
+    if (vSt.dataCount > 0 && stRows.length === 0) {
+      throw new Error('Rejected malformed or currency-mismatched rows in ' + reqPeriod);
+    }
+    if (vKw.dataCount > 0 && kwRows.length === 0) {
+      throw new Error('Rejected malformed or currency-mismatched rows in Active_Keywords');
+    }
+    const hadLoadedBrands = Boolean(
+      state.sheetCtxByPeriod[reqPeriod] &&
+      Object.values(state.sheetCtxByPeriod[reqPeriod].brands || {}).some(b => b && b.live_loaded)
+    );
+    if (stRows.length === 0 && (reqPeriod === '1m' || hadLoadedBrands)) {
+      throw new Error('Accidental 0-row wipe blocked on ' + reqPeriod);
+    }
+    if (reqPeriod === '1m' && stRows.filter(r => r.bs === 'fleur_quebec').length === 0) {
+      throw new Error('Accidental wipe of Fleur Québec baseline rows blocked on 1_Month');
+    }
+
     let nextCtx;
-    if (state.period === '1m' && matchesBaseline1mCanonical(stTxt, kwTxt, bmTxt)) {
+    if (reqPeriod === '1m' && matchesBaseline1mCanonical(stTxt, kwTxt, bmTxt)) {
       nextCtx = BASELINE_1M_CTX;
+    } else if (!stRows.length && reqPeriod !== '1m') {
+      nextCtx = null;
     } else {
-      const stRows = parseGoogleAdsCsv(stTxt, 'fleur_quebec');
-      const kwRows = parseActiveKeywordsCsv(kwTxt, 'fleur_quebec');
-      const bmRows = parseBrandBenchmarksCsv(bmTxt, 'fleur_quebec');
-      if (!stRows.length && state.period !== '1m') {
-        nextCtx = null;
-      } else {
-        nextCtx = scoreDataset(stRows, kwRows, bmRows, state.period, 'google_sheet_live');
-      }
+      nextCtx = scoreDataset(stRows, kwRows, bmRows, reqPeriod, 'google_sheet_live');
     }
 
     if (nextCtx) {
-      state.sheetCtxByPeriod[state.period] = nextCtx;
+      state.sheetCtxByPeriod[reqPeriod] = nextCtx;
     }
-    state.syncing = false;
+    if (state.syncSeq === reqSeq) state.syncing = false;
     state.syncError = null;
     state.lastCheckedTs = Date.now();
-    renderAll();
+    if (state.period === reqPeriod) {
+      renderAll();
+    } else {
+      renderFreshnessStrip();
+    }
     // Commit hash strictly at the end of try after scoring & render succeed
-    state.lastSyncedHashByPeriod[state.period] = bundleHash;
+    state.lastSyncedHashByPeriod[reqPeriod] = bundleHash;
   } catch (err) {
-    state.syncing = false;
+    if (state.syncSeq === reqSeq) state.syncing = false;
     state.syncError = err && err.message ? err.message : String(err);
     renderFreshnessStrip();
   }
