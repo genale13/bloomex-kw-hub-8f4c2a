@@ -380,11 +380,16 @@ function resolveBrandSlug(rawSub, rawCurrency, rawCostCell, fallbackSlug) {
   if (sRaw) {
     const low = foldText(sRaw);
     let matched = '';
-    if (low.includes('828-286-5409') || low.includes('fleur') || low.includes('quebec')) {
+    const hasFqCid = low.includes('828-286-5409');
+    const hasAbCid = low.includes('245-836-8322') || low.includes('au-pending');
+    if (hasFqCid && hasAbCid) return '';
+    if (hasFqCid) {
+      matched = 'fleur_quebec';
+    } else if (hasAbCid) {
+      matched = 'aussie_blooms';
+    } else if (low.includes('fleur') || low.includes('quebec')) {
       matched = 'fleur_quebec';
     } else if (
-      low.includes('245-836-8322') ||
-      low.includes('au-pending') ||
       low.includes('aussie') ||
       low.includes('blooms-aus') ||
       low.includes('blooms aus') ||
@@ -415,7 +420,7 @@ function fnv1aHash(str) {
     h2 ^= (code + (i & 0xff));
     h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
   }
-  return s.length + ':' + h1.toString(16) + h2.toString(16);
+  return s.length + ':' + h1.toString(16).padStart(8, '0') + ':' + h2.toString(16).padStart(8, '0');
 }
 
 function brandMetaForSlug(bs) {
@@ -2519,6 +2524,12 @@ function tr(lang, key, vars) {
         }
         renderAll();
       };
+      reader.onerror = () => {
+        state.syncError = state.lang === 'fr'
+          ? 'Erreur de lecture du fichier CSV.'
+          : 'Failed to read CSV file.';
+        renderFreshnessStrip();
+      };
       reader.readAsText(file);
     }
 
@@ -3325,7 +3336,7 @@ async function syncFromGoogleSheet(manualTrigger, optPeriod) {
     const bundleHash = fnv1aHash(stTxt) + '|' + fnv1aHash(kwTxt) + '|' + fnv1aHash(bmTxt);
     if (!manualTrigger && state.lastSyncedHashByPeriod[reqPeriod] === bundleHash && state.sheetCtxByPeriod[reqPeriod]) {
       if (state.syncSeq === reqSeq) state.syncing = false;
-      state.syncError = null;
+      if (state.period === reqPeriod) state.syncError = null;
       state.lastCheckedTs = Date.now();
       renderFreshnessStrip();
       return;
@@ -3368,7 +3379,7 @@ async function syncFromGoogleSheet(manualTrigger, optPeriod) {
       state.sheetCtxByPeriod[reqPeriod] = nextCtx;
     }
     if (state.syncSeq === reqSeq) state.syncing = false;
-    state.syncError = null;
+    if (state.period === reqPeriod) state.syncError = null;
     state.lastCheckedTs = Date.now();
     if (state.period === reqPeriod) {
       renderAll();
@@ -3378,8 +3389,11 @@ async function syncFromGoogleSheet(manualTrigger, optPeriod) {
     // Commit hash strictly at the end of try after scoring & render succeed
     state.lastSyncedHashByPeriod[reqPeriod] = bundleHash;
   } catch (err) {
+    if (state.syncSeqByPeriod[reqPeriod] !== reqSeq) return;
     if (state.syncSeq === reqSeq) state.syncing = false;
-    state.syncError = err && err.message ? err.message : String(err);
+    if (state.period === reqPeriod) {
+      state.syncError = err && err.message ? err.message : String(err);
+    }
     renderFreshnessStrip();
   }
 }
