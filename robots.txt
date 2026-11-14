@@ -1,0 +1,4 @@
+# Allow crawlers to fetch pages so they read <meta name="robots" content="noindex,nofollow"> in index.html
+# (Disallow: / would block crawlers from seeing the noindex directive)
+User-agent: *
+Allow: /
