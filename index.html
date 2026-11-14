@@ -573,10 +573,12 @@ function validateSheetCsvSchema(text, kind, requireNonEmptyRows) {
   const hdrFold = rows[hIdx].map(c => foldText(c));
   const iPrimary = kind === 'st'
     ? colIdx(hdrFold, ['search term', 'query', 'terme de recherche', 'termes de recherche'])
-    : 0;
+    : (kind === 'kw'
+        ? colIdx(hdrFold, ['keyword', 'search keyword', 'mot-cle', 'mot cle'])
+        : colIdx(hdrFold, ['campaign', 'campagne']));
   const dataCount = rows.slice(hIdx + 1).filter(r => {
     const c0 = foldText((iPrimary >= 0 ? r[iPrimary] : r[0]) || '');
-    return c0 && !c0.startsWith('total:') && c0 !== 'total';
+    return c0 && !c0.startsWith('total:') && c0 !== 'total' && !(kind !== 'st' && c0.startsWith('total'));
   }).length;
   if (requireNonEmptyRows && dataCount === 0) {
     return { ok: false, reason: 'Accidental 0-row wipe blocked on active tab (' + kind + ')' };
@@ -3333,11 +3335,14 @@ async function syncFromGoogleSheet(manualTrigger, optPeriod) {
     const kwRows = parseActiveKeywordsCsv(kwTxt, '');
     const bmRows = parseBrandBenchmarksCsv(bmTxt, '');
 
-    if (vSt.dataCount > 0 && stRows.length === 0) {
-      throw new Error('Rejected malformed or currency-mismatched rows in ' + reqPeriod);
+    if (stRows.length < vSt.dataCount) {
+      throw new Error('Rejected ' + (vSt.dataCount - stRows.length) + ' malformed or currency-mismatched row(s) in ' + reqPeriod);
     }
-    if (vKw.dataCount > 0 && kwRows.length === 0) {
-      throw new Error('Rejected malformed or currency-mismatched rows in Active_Keywords');
+    if (kwRows.length === 0 || kwRows.length < vKw.dataCount) {
+      throw new Error('Rejected malformed or currency-mismatched row(s) in Active_Keywords');
+    }
+    if (bmRows.length === 0 || bmRows.length < vBm.dataCount) {
+      throw new Error('Rejected malformed or currency-mismatched row(s) in Brand_Benchmarks');
     }
     const hadLoadedBrands = Boolean(
       state.sheetCtxByPeriod[reqPeriod] &&
